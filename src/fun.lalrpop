@@ -1,0 +1,76 @@
+use std::str::FromStr;
+use crate::ast::*;
+
+grammar;
+
+CommaNonEmpty<T>: Vec<T> = <v:(<T> ",")*> <e:T> => {
+    let mut v = v;
+    v.push(e);
+    v
+};
+
+
+pub Program: Program<'input> = <d:Definitions> => Program{defns: d};
+
+pub Definitions = Definition+;
+
+pub Definition: Definition<'input> = {
+    <f:FuncDefinition> => Definition::Func(f),
+    <t:TypeDefinition> => Definition::Type(t)
+}
+
+pub FuncDefinition: FuncDefinition<'input> = "fun" <n:LowerId> <p:LowerParams> "=" "{" <b:Expr> "}" =>
+    FuncDefinition{name: n, params: p, body: b, return_type: None, param_types: Vec::new()};
+
+pub Expr: ASTBox<'input> = {
+    <e:Expr> "+" <t:Term> => Box::new(BinOp{kind: BinOpType::Plus, lhs: e, rhs: t, mtype: None}),
+    <e:Expr> "-" <t:Term> => Box::new(BinOp{kind: BinOpType::Minus, lhs: e, rhs: t, mtype: None}),
+    <t:Term> => t
+}
+
+pub Term: ASTBox<'input> = {
+    <t:Term> "*" <a:App> => Box::new(BinOp{kind: BinOpType::Times, lhs: t, rhs: a, mtype: None}),
+    <t:Term> "/" <a:App> => Box::new(BinOp{kind: BinOpType::Divide, lhs: t, rhs: a, mtype: None}),
+    <a:App> => a
+}
+
+pub App: ASTBox<'input> = {
+    <a:App> <b:AppBase> => Box::new(App{left: a, right: b, mtype: None}),
+    <b: AppBase> => Box::new(b)
+}
+
+pub AppBase: AppBase<'input> = {
+    <i:Int> => AppBase::Int(i),
+    <l:LowerId> => AppBase::LowerId(l, None),
+    <u:UpperId> => AppBase::UpperId(u, None),
+    "(" <e:Expr> ")" => AppBase::Expr(e),
+    <m:Match> => AppBase::Match(m)
+}
+
+pub Match: ASTBox<'input> = "match" <e: Expr> "with" "{" <b:Branches> "}" =>
+    Box::new(Match{expr: e, branches: b, mtype: None}); 
+
+pub Branches = Branch+;
+
+pub Branch: Branch<'input> = <p:Pattern> "=>" "{" <e:Expr> "}" => Branch{pat: p, expr: e};
+
+pub Pattern: Pattern<'input> = {
+    <n:LowerId> => Pattern::Var(n),
+    <c:UpperId> <p:LowerParams> => Pattern::Constr(c, p)
+}
+
+pub TypeDefinition: TypeDefinition<'input>= "type" <n:UpperId> "=" "{" <c:TypeConstructors> "}" =>
+    TypeDefinition{name: n, constructors: c};
+
+pub TypeConstructors = CommaNonEmpty<TypeConstructor>;
+
+pub TypeConstructor: TypeConstructor<'input> = <n:UpperId> <t:UpperParams> =>
+    TypeConstructor{name: n, types: t, tag: -1};
+
+UpperParams = UpperId*;
+LowerParams = LowerId*;
+
+UpperId: &'input str = r"[A-Z][a-zA-Z0-9_]*" => <>;
+LowerId: &'input str = r"[a-z][a-zA-Z0-9_]*" => <>;
+
+Int: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
