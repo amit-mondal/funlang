@@ -8,57 +8,62 @@ mod ast;
 mod graph;
 mod codegen;
 
+use clap::{App, Arg};
+use std::fs;
+
 use types::typecheck::TypecheckContext;
 use graph::compile::CompileContext;
 use inkwell::context::Context;
-use codegen::llvm_gen::LLVMGenerator;
+use codegen::llvm_gen::{self, LLVMGenerator};
+
 
 
 fn main() {
 
-    let mut tree = fun::ProgramParser::new().parse("
+    let matches = App::new("funlangc")
+                            .version("1.0")
+                            .author("Amit M.")
+                            .about("LLVM compiler for funlang")
+                            .arg(Arg::with_name("INPUT")
+                                .help("Sets the input file to use")
+                                .required(true)
+                                .index(1))
+                            .arg(Arg::with_name("output_file")
+                                .short("o")
+                                .long("output")
+                                .value_name("FILE")
+                                .help("Sets the name of the output object file")
+                                .takes_value(true)
+                                .default_value("out.o"))
+                            .arg(Arg::with_name("llvm_file")
+                                .short("lo")
+                                .long("llvm-out")
+                                .value_name("LLVMFILE")
+                                .help("Set then name of the output LLVM bitcode file")
+                                .takes_value(true)) 
+                            .arg(Arg::with_name("print_instructions")
+                                .short("pi")
+                                .long("print-instructions")
+                                .help("Print the intermediate G-machine instructions"))
+                            .get_matches();
 
-type List = {
-    Cons Int List, Nil
-}
+    let source_file = matches.value_of("INPUT").unwrap();
+    let output_file = matches.value_of("output_file").unwrap();
+    let llvmout_file_opt = matches.value_of("llvm_file");
 
-fun applyToList fn l i = {
-    match l with {
-        Cons x xs => {
-            Cons (fn x i) xs
-        }
-        Nil => { Nil }
-    }
-}
+    let source = fs::read_to_string(source_file).
+        expect(&format!("Failed to read input file {}", source_file));
 
-fun add x y = {
-    x + y
-}
+    let mut tree = fun::ProgramParser::new().parse(&source).unwrap();
 
-fun ones = { Cons 1 ones }
-
-fun fst l = {
-    match l with {
-        Cons x xs => { x }
-        Nil => { 0 }
-    }
-}
-
-fun main = {
-    fst (applyToList add ones 2)
-}
-
-").unwrap();
-
-//length (Cons 5 (Cons 4 (Cons 3 (Cons 2 (Cons 1 Nil)))))
-
-    
     TypecheckContext::new().typecheck(&mut tree);
     let instructions = CompileContext::new().compile(&mut tree);
 
-    println!("{:?}", instructions);
+    if matches.is_present("print_instructions") {
+        println!("{:?}", instructions);
+    }
 
     let ctx = Context::create();
     let mut llvmgen = LLVMGenerator::new(&ctx);
-    llvmgen.generate(&mut tree, &instructions, Some("out.ll"), "out.o").unwrap();
+    llvmgen.generate(&mut tree, &instructions, llvmout_file_opt, output_file).unwrap();
 }

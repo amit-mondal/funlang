@@ -1,8 +1,11 @@
 #include "gmachine.h"
 #include "node.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 void gmachine_init(struct gmachine* g) {
-    stack_init(g->stack);
+    stack_init(&g->stack);
     g->gc_nodes = NULL;
     g->gc_node_cnt = 0;
     g->gc_node_thresh = GC_NODE_INIT_THRESH;
@@ -25,7 +28,8 @@ void gmachine_update(struct gmachine* g, size_t o) {
 void gmachine_alloc(struct gmachine* g, size_t o) {
     unsigned i;
     for (i = 0; i < o; i++) {
-	    gmachine_push(&g->stack, (struct node_base*) alloc_ind(NULL));
+	    //gmachine_push(&g->stack, (struct node_base*) alloc_ind(NULL));
+        stack_push(&g->stack, gmachine_track(g, (struct node_base*) alloc_ind(NULL)));
     }
 }
 
@@ -43,7 +47,7 @@ void gmachine_pack(struct gmachine* g, size_t n, int8_t t) {
     new_node->tag = t;
 
     stack_popn(&g->stack, n);
-    stack_push(&g->stack, (struct node_base*) new_node);
+    stack_push(&g->stack, gmachine_track(g, (struct node_base*) new_node));
 }
 
 void gmachine_split(struct gmachine* g, size_t n) {
@@ -52,4 +56,94 @@ void gmachine_split(struct gmachine* g, size_t n) {
     for (i = 0; i < n; i++) {
 	    stack_push(&g->stack, node->arr[i]);
     }
+}
+
+/**
+ * Recursively mark nodes and all children as reachable.
+ */
+void gc_visit_node(struct node_base* n) {
+    if (n->gc_reachable) {
+        return;
+    }
+
+    n->gc_reachable = 1;
+    switch (n->kind) {
+    case NODE_APP: {
+        struct node_app* app = (struct node_app*) n;
+        gc_visit_node(app->left);
+        gc_visit_node(app->right);
+        break;
+    }
+    case NODE_IND: {
+        struct node_ind* ind = (struct node_ind*) n;
+        gc_visit_node(ind->next);
+        break;
+    }
+    case NODE_DATA: {
+        struct node_data* data = (struct node_data*) n;
+        struct node_base** data_node = data->arr;
+
+        while (*data_node) {
+            gc_visit_node(*data_node);
+            data_node++;
+        }
+    }
+    default:
+        break;
+    }
+}
+
+/**
+ * Add node to list of nodes to be tracked by the runtime. GC when we've exceeded double the
+ * prior threshold.
+ */
+struct node_base* gmachine_track(struct gmachine* g, struct node_base* n) {
+    /* Update count, add node to gmachine's linked list */
+    g->gc_node_cnt++;
+    n->gc_next = g->gc_nodes;
+    g->gc_nodes = n;
+
+    /* GC if we'v'e exceeded the threshold, and double the threshold */
+    if (g->gc_node_cnt > g->gc_node_thresh) {
+        uint64_t nodes_before = g->gc_node_cnt;
+        /* We must visit the node here to mark it and its children as reachable. Otherwise,
+           we run the risk of accidentally GCing values, as in the case of gmachine_pack */
+        gc_visit_node(n);
+        gmachine_gc(g);
+        g->gc_node_thresh = nodes_before * 2;
+    }
+
+    return n;
+}
+
+void free_node_data(struct node_base* n) {
+    if (n->kind == NODE_DATA) {
+        free(((struct node_data*) n)->arr);
+    }
+}
+
+void gmachine_gc(struct gmachine* g) {
+    //printf("collecting...\n");
+    for (size_t i = 0; i < g->stack.count; i++) {
+        gc_visit_node(g->stack.data[i]);
+    }
+
+    struct node_base** node_ptr = &g->gc_nodes;
+
+    /* If a node has been marked reachable in this pass, unmark it for
+    future passes. Otherwise, we free the node and decrement the node count. */
+    size_t init_node_cnt = g->gc_node_cnt;
+    while (*node_ptr) {
+        if ((*node_ptr)->gc_reachable) {
+            (*node_ptr)->gc_reachable = 0;
+            node_ptr = &((*node_ptr)->gc_next);
+        } else {
+            struct node_base* garbage_node = *node_ptr;
+            *node_ptr = garbage_node->gc_next;
+            free_node_data(garbage_node);
+            free(garbage_node);
+            g->gc_node_cnt--;
+        }
+    }
+    //printf("freed %llu\n", (init_node_cnt - g->gc_node_cnt));
 }

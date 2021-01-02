@@ -12,8 +12,8 @@ char *NODE_KIND_TO_STR[] = {
 	"Data"
 };
 
-void unwind(struct stack *s) {
-
+void unwind(struct gmachine *g) {
+	struct stack* s = &g->stack;
 	while (1) {
 		struct node_base *peek = stack_peek(s, 0);
 		switch (peek->kind) {
@@ -21,14 +21,14 @@ void unwind(struct stack *s) {
 			stack_push(s, ((struct node_app *)peek)->left);
 			break;
 		case NODE_GLOBAL: {
-			struct node_global *g = (struct node_global *)peek;
-			assert(s->count > g->arity);
+			struct node_global* n = (struct node_global *)peek;
+			assert(s->count > (size_t) n->arity);
 
-			for (unsigned i = 1; i <= g->arity; i++) {
+			for (int i = 1; i <= n->arity; i++) {
 				s->data[s->count - i] = ((struct node_app *)s->data[s->count - i - 1])->right;
 			}
 
-			g->fn(s);
+			n->fn(s);
 			break;
 		}
 		case NODE_IND:
@@ -40,17 +40,6 @@ void unwind(struct stack *s) {
 			return;
 		}
 	}
-}
-
-struct node_base *eval(struct node_base *n) {
-	struct stack s;
-	stack_init(&s);
-	stack_push(&s, n);
-	unwind(&s);
-	struct node_base *res = stack_pop(&s);
-	printf("Stack size before free: %zu\n", s.count);
-	stack_free(&s);
-	return res;
 }
 
 void print_node(struct node_base *n) {
@@ -74,7 +63,7 @@ void print_node(struct node_base *n) {
 		break;
 	case NODE_DATA: {
 		struct node_data* d = (struct node_data*) n;
-		printf("(Data, tag %d, arr [?])", d->tag);
+		printf("((Packed) Data, tag %d, arr [?])", d->tag);
 		break;
 	}
 	case NODE_NUM:
@@ -84,9 +73,16 @@ void print_node(struct node_base *n) {
 
 extern void f_main(struct stack *s);
 
-int main(int argc, char **argv) {
-	struct node_global *start = alloc_global(f_main, 0);
-	struct node_base *res = eval((struct node_base *)start);
+int main(__attribute__((unused)) int argc, __attribute__((unused)) char **argv) {
+	struct gmachine gmachine;
+	struct node_global* start = alloc_global(f_main, 0);
+	struct node_base* res;
+
+	gmachine_init(&gmachine);
+	gmachine_track(&gmachine, (struct node_base*) start);
+	stack_push(&gmachine.stack, (struct node_base*) start);
+	unwind(&gmachine);
+	res = stack_pop(&gmachine.stack);
 	print_node(res);
 	printf("\n");
 }

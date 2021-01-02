@@ -17,6 +17,7 @@ pub struct CustomFunc<'ctx> {
 
 struct GenContextTypes<'ctx> {
     struct_types: HashMap<String, StructType<'ctx>>,
+    sizet_type: IntType<'ctx>,
     gmachine_type: StructType<'ctx>,
     gmachine_ptr_type: PointerType<'ctx>,
     stack_type: StructType<'ctx>,
@@ -38,8 +39,13 @@ impl<'ctx> GenContext<'ctx> {
     fn init_types(ctx: &Context) -> GenContextTypes {
         let mut struct_types = HashMap::new();
 
+        let sizet_type = match size_of::<usize>() {
+            4 => ctx.i32_type(),
+            8 => ctx.i64_type(),
+            _ => panic!("usize is not 32 or 64 bits"),
+        };
+
         let gmachine_type = ctx.opaque_struct_type("gmachine");
-        let gmachine_ptr_type = gmachine_type.ptr_type(AddressSpace::Generic);
 
         let stack_type = ctx.opaque_struct_type("stack");
         let stack_ptr_type = stack_type.ptr_type(AddressSpace::Generic);
@@ -47,12 +53,22 @@ impl<'ctx> GenContext<'ctx> {
         let node_base = ctx.opaque_struct_type("node_base");
         let node_ptr_type = node_base.ptr_type(AddressSpace::Generic);
 
-        let func_type = ctx.void_type().fn_type(&[gmachine_ptr_type.into()], false);
+        
 
-        node_base.set_body(&[ctx.i32_type().into()], false);
+        // Warning! For some reason moving the node_base set_body call into the array below will cause
+        // unwrap_node_val calls to segfault. Presumably they must be set before any instances of node_base are
+        // used.
+        node_base.set_body(&[ctx.i32_type().into(), ctx.i8_type().into(), node_ptr_type.into()], false);
+        stack_type.set_body(
+            &[sizet_type.into(), sizet_type.into(), node_ptr_type.ptr_type(AddressSpace::Generic).into()],
+            false
+        );
         gmachine_type.set_body(
-            &[stack_ptr_type.into(), node_ptr_type.into(), ctx.i64_type().into(), ctx.i64_type().into()],
+            &[stack_type.into(), node_ptr_type.into(), ctx.i64_type().into(), ctx.i64_type().into()],
             false);
+
+        let gmachine_ptr_type = gmachine_type.ptr_type(AddressSpace::Generic);
+        let func_type = ctx.void_type().fn_type(&[gmachine_ptr_type.into()], false);
 
         [
             (
@@ -79,6 +95,7 @@ impl<'ctx> GenContext<'ctx> {
         });
 
         GenContextTypes {
+            sizet_type,
             struct_types,
             gmachine_type,
             gmachine_ptr_type,
@@ -93,15 +110,11 @@ impl<'ctx> GenContext<'ctx> {
     fn init_funcs(&mut self) {
         let ctx = self.ctx;
         let void_type = ctx.void_type();
+        let sizet_type = self.types.sizet_type;
         let stack_ptr_type = self.types.stack_ptr_type;
         let gmachine_ptr_type = self.types.gmachine_ptr_type;
         let node_ptr_type = self.types.node_ptr_type;
         let func_ptr_type = self.types.func_type.ptr_type(AddressSpace::Generic);
-        let sizet_type = match size_of::<usize>() {
-            4 => ctx.i32_type(),
-            8 => ctx.i64_type(),
-            _ => panic!("usize is not 32 or 64 bits"),
-        };
 
         let basic_stack_fn = |name| {
             (name, void_type.fn_type(&[stack_ptr_type.into(), sizet_type.into()], false))};
@@ -132,14 +145,6 @@ impl<'ctx> GenContext<'ctx> {
                 node_ptr_type.fn_type(&[stack_ptr_type.into(), sizet_type.into()], false),
             ),
             basic_stack_fn("stack_popn"),
-            basic_stack_fn("stack_slide"),
-            basic_stack_fn("stack_update"),
-            basic_stack_fn("stack_alloc"),
-            basic_stack_fn("stack_split"),
-            (
-                "stack_pack",
-                node_ptr_type.fn_type(&[stack_ptr_type.into(), sizet_type.into(), self.types.tag_type.into()], false)
-            ),
             (
                 "alloc_app",
                 node_ptr_type.fn_type(&[node_ptr_type.into(), node_ptr_type.into()], false),
@@ -157,16 +162,28 @@ impl<'ctx> GenContext<'ctx> {
                 node_ptr_type.fn_type(&[node_ptr_type.into()], false),
             ),
             (
-                "eval",
-                node_ptr_type.fn_type(&[node_ptr_type.into()], false),
+                "unwind",
+                void_type.fn_type(&[gmachine_ptr_type.into()], false)
             ),
             (
-                "unwind",
-                void_type.fn_type(&[stack_ptr_type.into()], false)
+                "gmachine_init",
+                void_type.fn_type(&[gmachine_ptr_type.into()], false)
             ),
+            (
+                "gmachine_free",
+                void_type.fn_type(&[gmachine_ptr_type.into()], false)
+            ),
+            basic_gmachine_fn("gmachine_slide"),
+            basic_gmachine_fn("gmachine_update"),
+            basic_gmachine_fn("gmachine_alloc"),
+            (
+                "gmachine_pack",
+                void_type.fn_type(&[gmachine_ptr_type.into(), sizet_type.into(), ctx.i8_type().into()], false)
+            ),
+            basic_gmachine_fn("gmachine_split"),
             (
                 "gmachine_track",
-                void_type.fn_type(&[gmachine], is_var_args)
+                node_ptr_type.fn_type(&[gmachine_ptr_type.into(), node_ptr_type.into()], false)
             )
         ]
         .into_iter()
@@ -263,7 +280,7 @@ impl<'ctx> GenContext<'ctx> {
     }
 
     pub fn create_update(&self, f: FunctionValue<'ctx>, off: BasicValueEnum<'ctx>) {
-        let func = self.funcs.get("stack_update").unwrap();
+        let func = self.funcs.get("gmachine_update").unwrap();
         self.builder.build_call(*func, &[f.get_first_param().unwrap(), off], "call_update");
     }
 
@@ -273,36 +290,40 @@ impl<'ctx> GenContext<'ctx> {
         c: BasicValueEnum<'ctx>,
         t: BasicValueEnum<'ctx>,
     ) {
-        let func = self.funcs.get("stack_pack").unwrap();
+        let func = self.funcs.get("gmachine_pack").unwrap();
         self.builder
             .build_call(*func, &[f.get_first_param().unwrap(), c, t], "call_pack");
     }
 
     pub fn create_split(&self, f: FunctionValue<'ctx>, c: BasicValueEnum<'ctx>) {
-        let func = self.funcs.get("stack_split").unwrap();
+        let func = self.funcs.get("gmachine_split").unwrap();
         self.builder
             .build_call(*func, &[f.get_first_param().unwrap(), c], "call_split");
     }
 
     pub fn create_slide(&self, f: FunctionValue<'ctx>, off: BasicValueEnum<'ctx>) {
-        let func = self.funcs.get("stack_slide").unwrap();
+        let func = self.funcs.get("gmachine_slide").unwrap();
         self.builder
             .build_call(*func, &[f.get_first_param().unwrap(), off], "call_slide");
     }
 
     pub fn create_alloc(&self, f: FunctionValue<'ctx>, n: BasicValueEnum<'ctx>) {
-        let func = self.funcs.get("stack_alloc").unwrap();
+        let func = self.funcs.get("gmachine_alloc").unwrap();
         self.builder
             .build_call(*func, &[f.get_first_param().unwrap(), n], "call_alloc");
     }
 
-    pub fn create_eval(&self, e: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
-        let eval_func = self.funcs.get("eval").unwrap();
-        self.builder
-            .build_call(*eval_func, &[e], "call_eval")
+    pub fn create_track( &self, f: FunctionValue<'ctx>, n: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        let func = self.funcs.get("gmachine_track").unwrap();
+        self.builder.build_call(*func, &[f.get_first_param().unwrap(), n], "call_track")
             .try_as_basic_value()
             .left()
             .unwrap()
+    }
+
+    pub fn create_unwind(&self, f: FunctionValue<'ctx>) {
+        let func = self.funcs.get("unwind").unwrap();
+        self.builder.build_call(*func, &[f.get_first_param().unwrap()], "call_unwind");
     }
 
     pub fn unwrap_node_val(
@@ -336,13 +357,14 @@ impl<'ctx> GenContext<'ctx> {
         self.unwrap_node_val(v, "node_num", 1)
     }
 
-    pub fn create_num(&self, v: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+    pub fn create_num(&self, f: FunctionValue<'ctx>, v: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("alloc_num").unwrap();
-        self.builder
+        let alloc_num_call = self.builder
             .build_call(*func, &[v], "call_alloc_num")
             .try_as_basic_value()
             .left()
-            .unwrap()
+            .unwrap();
+        self.create_track(f, alloc_num_call)
     }
 
     pub fn unwrap_data_tag(&self, v: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
@@ -351,38 +373,40 @@ impl<'ctx> GenContext<'ctx> {
 
     pub fn create_global(
         &self,
-        f: BasicValueEnum<'ctx>,
+        f: FunctionValue<'ctx>,
+        gf: BasicValueEnum<'ctx>,
         a: BasicValueEnum<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("alloc_global").unwrap();
-        self.builder
-            .build_call(*func, &[f, a], "call_alloc_global")
+        let alloc_app_call = self.builder
+            .build_call(*func, &[gf, a], "call_alloc_global")
             .try_as_basic_value()
             .left()
-            .unwrap()
+            .unwrap();
+        self.create_track(f, alloc_app_call)
     }
 
     pub fn create_app(
         &self,
+        f: FunctionValue<'ctx>,
         l: BasicValueEnum<'ctx>,
         r: BasicValueEnum<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("alloc_app").unwrap();
-        self.builder
+        let alloc_app_call = self.builder
             .build_call(*func, &[l, r], "call_alloc_app")
             .try_as_basic_value()
             .left()
-            .unwrap()
-    }
-
-    pub fn create_unwind(&self, f: FunctionValue<'ctx>) {
-        self.builder.build_call(
-            *self.funcs.get("unwind").unwrap(),
-            &[f.get_first_param().unwrap()],
-            "call_unwind");
+            .unwrap();
+        self.create_track(f, alloc_app_call)
     }
 
     pub fn unwrap_gmachine_stack_ptr(&self, v: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
-        self.unwrap_node_val(v, "gmachine", 0)
+        let offset0 = self.create_i32(0);
+        unsafe {
+            self.builder
+                .build_gep(v, &[offset0, offset0], "gmachine_stack_ptr_gep").into()
+        }
     }
 }
+

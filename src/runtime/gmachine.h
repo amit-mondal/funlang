@@ -1,4 +1,5 @@
 #include "stack.h"
+#include "assert.h"
 
 #define GC_NODE_INIT_THRESH 128
 

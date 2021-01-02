@@ -18,6 +18,8 @@ enum node_kind {
 
 struct node_base {
     enum node_kind kind;
+    int8_t gc_reachable;
+    struct node_base* gc_next;
 };
 
 struct node_app {

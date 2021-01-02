@@ -6,6 +6,8 @@
 struct node_base* alloc_node() {
     struct node_base* new_node = malloc(sizeof(struct node_app));
     assert(new_node != NULL);
+    new_node->gc_reachable = 0;
+    new_node->gc_next = NULL;
     return new_node;
 }
 

@@ -4,8 +4,9 @@
 
 #include "stack.h"
 #include "node.h"
+#include "gmachine.h"
 
-void unwind(struct stack* s);
+void unwind(struct gmachine* g);
 struct node_base* eval(struct node_base* n);
 
 #endif

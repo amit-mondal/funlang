@@ -28,7 +28,7 @@ impl<'ctx> LLVMGenerator<'ctx> {
     fn generate_llvm(&self, i: &Instruction, f: FunctionValue<'ctx>) {
         match i {
             Instruction::PushInt(i) => {
-                self.gc.create_push(f, self.gc.create_num(self.gc.create_i32(*i).into()));
+                self.gc.create_push(f, self.gc.create_num(f, self.gc.create_i32(*i).into()));
             }
             Instruction::PushGlobal(n) => {
                 let global_func = self.custom_funcs.get(&(String::from("f_") + &n)).unwrap();
@@ -37,7 +37,7 @@ impl<'ctx> LLVMGenerator<'ctx> {
                 self.gc.create_push(
                     f,
                     self.gc
-                        .create_global(global_func_as_ptr.into(), arity_val.into()),
+                        .create_global(f, global_func_as_ptr.into(), arity_val.into()),
                 );
             }
             Instruction::Push(o) => {
@@ -50,7 +50,7 @@ impl<'ctx> LLVMGenerator<'ctx> {
             Instruction::MkApp => {
                 let l = self.gc.create_pop(f);
                 let r = self.gc.create_pop(f);
-                self.gc.create_push(f, self.gc.create_app(l, r));
+                self.gc.create_push(f, self.gc.create_app(f, l, r));
             }
             Instruction::Update(o) => {
                 self.gc.create_update(f, self.gc.create_size(*o).into());
@@ -143,7 +143,7 @@ impl<'ctx> LLVMGenerator<'ctx> {
                 .build_int_signed_div(left, right, "int_sdiv"),
         };
 
-        self.gc.create_push(f, self.gc.create_num(op_val.into()));
+        self.gc.create_push(f, self.gc.create_num(f, op_val.into()));
     }
 
     fn init_functions(&mut self, defn: &Definition) {
