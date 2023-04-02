@@ -1,141 +1,112 @@
+use super::call_graph::CallGraph;
+use super::free_var_visit::FreeVarVisitor;
+use super::type_visit::TypeVisitor;
+use super::Type;
+use crate::ast::Program;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use super::type_visit::{TypeVisitor, TypeResolveVisitor};
-use super::{Type, TypeData};
-use crate::ast::{Definition, Program};
 
 pub struct TypecheckContext {
-    visitor: TypeVisitor,
-    defined_types: HashMap<String, Rc<Type>>
+    v: FreeVarVisitor,
 }
 
 impl TypecheckContext {
-
     pub fn new() -> TypecheckContext {
-        let mut v = TypeVisitor::new();
-        v.push_env();
+        let mut v = FreeVarVisitor::new();
+        v.env_stack.push();
 
         let int_type = Rc::new(Type::Base(String::from("Int"), None));
+        let string_type = Rc::new(Type::Base(String::from("String"), None));
+        let int_to_string_type = Rc::new(Type::Function(
+            Rc::clone(&int_type),
+            Rc::clone(&string_type),
+        ));
         let int_binop_type = Rc::new(Type::Function(
-            Rc::clone(&int_type), Rc::new(Type::Function(Rc::clone(&int_type), Rc::clone(&int_type)))));
+            Rc::clone(&int_type),
+            Rc::new(Type::Function(Rc::clone(&int_type), Rc::clone(&int_type))),
+        ));
 
-        v.env_bind(String::from("+"), Rc::clone(&int_binop_type));
-        v.env_bind(String::from("-"), Rc::clone(&int_binop_type));
-        v.env_bind(String::from("*"), Rc::clone(&int_binop_type));
-        v.env_bind(String::from("/"), Rc::clone(&int_binop_type));
+        v.env_stack.bind_type(String::from("String"), string_type);
+        v.env_stack.bind_type(String::from("Int"), int_type);
 
-        // Built-in types defined here.
-        let mut t = HashMap::new();
-        t.insert(String::from("Int"), Rc::clone(&int_type));
+        v.env_stack
+            .bind_from_type(String::from("+"), Rc::clone(&int_binop_type));
+        v.env_stack
+            .bind_from_type(String::from("-"), Rc::clone(&int_binop_type));
+        v.env_stack
+            .bind_from_type(String::from("*"), Rc::clone(&int_binop_type));
+        v.env_stack
+            .bind_from_type(String::from("/"), Rc::clone(&int_binop_type));
+        v.env_stack.bind_from_type(
+            String::from("int_to_string"),
+            Rc::clone(&int_to_string_type),
+        );
 
-        TypecheckContext { visitor: v, defined_types: t }
+        TypecheckContext { v }
     }
 
-    pub fn typecheck(&mut self, p: &mut Program) {
-
-        /* Keep track of all user defined types in defined_types for use when checking type parameters of 
-           type constructors */
-        for def in p.defns.iter_mut() {
-            if let Definition::Type(td) = def {
-                let def_type = Rc::new(Type::Base(td.name.to_owned(), Some(RefCell::new(TypeData::new()))));
-                self.defined_types.insert(td.name.to_owned(), def_type);
-            }
+    pub fn typecheck(mut self, p: &mut Program) {
+        for (_, type_defn) in &mut p.type_defns {
+            type_defn.insert_types(&mut self.v);
         }
 
-        /* Fill in all known types from type definitions and add placeholder types on functions */
-        for def in p.defns.iter_mut() {
-            self.create_partial_types(def)
+        for (_, type_defn) in &mut p.type_defns {
+            type_defn.insert_constructors(&mut self.v);
         }
 
-        /* Fully typecheck based on partial types */
-        for def in p.defns.iter_mut() {
-            self.typecheck_definition(def)
+        for (_, func_defn) in &mut p.func_defns {
+            self.v.visit_func_defn(func_defn);
         }
 
-        /* Replace all placeholder types with their corresponding base type */
-        for def in p.defns.iter_mut() {
-            self.type_resolve_definition(def, &mut TypeResolveVisitor::new(&self.visitor))
+        let mut call_dep_graph = CallGraph::new();
+
+        for (external_func_name, external_decl) in &p.extern_decls {
+            call_dep_graph.add_function(external_func_name);
+            let type_ = external_decl.to_type(&self.v).unwrap();
+            //extern_func_types.insert(external_func_name, type_);
+            self.v.env_stack.bind_from_type(external_func_name.clone(), type_);
         }
-    }
 
-    fn create_partial_types(&mut self, def: &mut Definition) {
-        match def {
-            Definition::Func(fd) => {
-                // This is the return type of the function.
-                let mut full_type = Rc::new(self.visitor.new_placeholder());
-                fd.return_type = Some(Rc::clone(&full_type));
-
-                for _ in fd.params.iter().rev() {
-                    let param_type = Rc::new(self.visitor.new_placeholder());
-                    full_type = Rc::new(Type::Function(Rc::clone(&param_type), Rc::clone(&full_type)));
-                    // Note that parameter types are pushed in reverse order.
-                    fd.param_types.push(param_type);
-                }
-
-                self.visitor.env_bind(fd.name.to_owned(), full_type);
-
-            },
-            Definition::Type(td) => {
-                let return_type = Rc::clone(self.defined_types.get(&td.name.to_owned()).unwrap());
-                /* This if-statement always evaluates to true. It's only needed to get at the internals of
-                   the return_type variable we just made */
-                if let Type::Base(type_name, Some(type_data)) = &*Rc::clone(&return_type) {
-                    self.defined_types.insert(type_name.clone(), Rc::clone(&return_type));
-                    let mut curr_tag = 0;               
-                    for constructor in td.constructors.iter_mut() {
-                        /* Store unique tag for each constructor in the Type enum itself */
-                        constructor.tag = curr_tag;
-                        type_data.borrow_mut().constr_tags.insert(constructor.name.to_owned(), curr_tag);
-                        curr_tag += 1;
-                        
-                        let mut full_type = Rc::clone(&return_type);
-                        /* Type parameters are read in forward, so we must iterate backwards to
-                        create a right-recursive type definition */
-                        for type_name in constructor.types.iter().rev() {
-                            //let curr_type = Rc::new(Type::Base((*type_name).to_owned(), None));
-                            if let Some(curr_type) = self.defined_types.get(&(*type_name).to_owned()) {
-                                full_type = Rc::new(Type::Function(Rc::clone(curr_type), full_type));
-                            } else {
-                                panic!("expected {} to be defined in typecheck context", type_name)
-                            }
-                        }
-
-                        self.visitor.env_bind(constructor.name.to_owned(), full_type);
-                    }
+        for (_, func_defn) in &p.func_defns {
+            let fd_name = func_defn.name.to_owned();
+            call_dep_graph.add_function(&fd_name);
+            for dep in &func_defn.free_vars {
+                if !p.func_defns.contains_key(dep) && !p.extern_decls.contains_key(dep) {
+                    panic!(
+                        "could not find call graph dependency 
+                        {} in the list of function definitions",
+                        dep
+                    );
                 } else {
-                    panic!("expected Base(_, Some(_)), got {:?}", return_type);             
+                    call_dep_graph.add_edge(&fd_name, dep);
                 }
             }
         }
-    }
 
-    fn typecheck_definition(&mut self, def: &mut Definition) {
-        match def {
-            Definition::Func(fd) => {
-                self.visitor.push_env();
-                for (param, param_type) in fd.params.iter().zip(fd.param_types.iter().rev()) {
-                    self.visitor.env_bind((*param).to_owned(), Rc::clone(param_type))
-                }
+        let ordered_groups = call_dep_graph.compute_order();
+        let ordered_groups = ordered_groups.iter().map(|group| {
+            group.iter().filter(|func_name|!p.extern_decls.contains_key(*func_name)).collect::<HashSet<_>>()
+        }).collect::<Vec<_>>();
 
-                let body_type = fd.body.type_accept(&mut self.visitor);
-                self.visitor.unify(body_type, Rc::clone(fd.return_type.as_ref().unwrap())).unwrap();
-                self.visitor.pop_env();
+        for group in ordered_groups.iter().rev() {
+            for func_name in group {
+                let func = p.func_defns.get(*func_name).unwrap();
+                func.insert_types(&mut self.v);
             }
-            Definition::Type(_) => {}
         }
-    }
 
-    fn type_resolve_definition(&self, def: &mut Definition, trv: &mut TypeResolveVisitor) {
-        match def {
-            Definition::Func(fd) => {
-                for param_type in fd.param_types.iter_mut() {
-                    trv.resolve_type(param_type).unwrap();
-                }
-                trv.resolve_type(fd.return_type.as_mut().unwrap()).unwrap();
-                fd.body.accept(trv);
+        let mut type_visitor = TypeVisitor::new(self.v);
+        for group in ordered_groups.iter().rev() {
+            println!("{:?}", group);
+            for func_name in group {
+                let func = p.func_defns.get_mut(*func_name).unwrap();
+                type_visitor.visit_func_defn(func);
             }
-            Definition::Type(_) => ()
+
+            for func_name in group {
+                type_visitor.generalize_func_type(type_visitor.env_stack.global_env_id, func_name);
+            }
         }
+        type_visitor.print_global_names();
     }
 }

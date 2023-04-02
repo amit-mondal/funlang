@@ -1,11 +1,13 @@
-use super::{CustomFunc, GenContext};
-use crate::ast::{BinOpType, Definition, Program};
+use super::{CustomFunc, ExternFunc, GenContext};
+use crate::ast::{BinOpType, ExternDecl, FuncDefinition, Program, VariantDefinition};
 use crate::graph::instructions::{Instruction, JumpInstruction};
 use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
 use inkwell::values::{FunctionValue, IntValue};
 use inkwell::OptimizationLevel;
-use inkwell::targets::{Target, TargetMachine, InitializationConfig, CodeModel, RelocMode, FileType};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -13,24 +15,41 @@ pub struct LLVMGenerator<'ctx> {
     gc: GenContext<'ctx>,
     custom_funcs: HashMap<String, CustomFunc<'ctx>>,
     generated_funcs: Vec<FunctionValue<'ctx>>,
+    extern_funcs: Vec<ExternFunc<'ctx>>
 }
 
 impl<'ctx> LLVMGenerator<'ctx> {
-
     pub fn new(ctx: &'ctx Context) -> LLVMGenerator<'ctx> {
         LLVMGenerator {
             gc: GenContext::new(ctx),
             custom_funcs: HashMap::new(),
             generated_funcs: Vec::new(),
+            extern_funcs: Vec::new(),
         }
     }
 
     fn generate_llvm(&self, i: &Instruction, f: FunctionValue<'ctx>) {
         match i {
             Instruction::PushInt(i) => {
-                self.gc.create_push(f, self.gc.create_num(f, self.gc.create_i32(*i).into()));
+                self.gc
+                    .create_push(f, self.gc.create_num(f, self.gc.create_i32(*i).into()));
+            }
+            Instruction::PushString(s) => {
+                self.gc.create_push(
+                    f,
+                    self.gc.create_str(
+                        f,
+                        self.gc.create_const_str_as_ptr(s).into(),
+                        self.gc.create_i32(s.len() as i32).into(),
+                    ),
+                );
             }
             Instruction::PushGlobal(n) => {
+                let foo = self
+                    .custom_funcs
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>();
                 let global_func = self.custom_funcs.get(&(String::from("f_") + &n)).unwrap();
                 let arity_val = self.gc.create_i32(global_func.arity as i32);
                 let global_func_as_ptr = global_func.func.as_global_value().as_pointer_value();
@@ -146,36 +165,45 @@ impl<'ctx> LLVMGenerator<'ctx> {
         self.gc.create_push(f, self.gc.create_num(f, op_val.into()));
     }
 
-    fn init_functions(&mut self, defn: &Definition) {
-        match defn {
-            Definition::Func(fd) => {
-                self.generated_funcs.push(self.gc.create_custom_func(
-                    &mut self.custom_funcs,
-                    fd.name.to_owned(),
-                    fd.params.len(),
-                ));
-            }
-            Definition::Type(td) => {
-                for constr in td.constructors.iter() {
-                    let constr_func = self.gc.create_custom_func(
-                        &mut self.custom_funcs,
-                        constr.name.to_owned(),
-                        constr.types.len(),
-                    );
+    fn type_generate_llvm(&mut self, td: &VariantDefinition) {
+        for constr in td.constructors.iter() {
+            let constr_func = self.gc.create_custom_func(
+                &mut self.custom_funcs,
+                constr.name.to_owned(),
+                constr.types.len(),
+            );
 
-                    self.gc
-                        .builder
-                        .position_at_end(constr_func.get_last_basic_block().unwrap());
+            self.gc
+                .builder
+                .position_at_end(constr_func.get_last_basic_block().unwrap());
 
-                    &[
-                        Instruction::Pack(constr.types.len(), constr.tag),
-                        Instruction::Update(0)
-                    ].into_iter().for_each(|insn| self.generate_llvm(insn, constr_func));
+            [
+                Instruction::Pack(constr.types.len(), constr.tag),
+                Instruction::Update(0),
+            ]
+            .iter()
+            .for_each(|insn| self.generate_llvm(insn, constr_func));
 
-                    self.gc.builder.build_return(None);
-                }
-            }
+            self.gc.builder.build_return(None);
         }
+    }
+
+    fn func_declare_llvm(&mut self, fd: &FuncDefinition) {
+        self.generated_funcs.push(self.gc.create_custom_func(
+            &mut self.custom_funcs,
+            fd.name.to_owned(),
+            fd.params.len(),
+        ));
+    }
+
+    fn extern_func_declare_llvm(&mut self, ed: &ExternDecl) {
+        let arity = ed.type_decl.arrow_separated.len() - 1;
+        self.extern_funcs.push(self.gc.create_extern_func(
+            &mut self.custom_funcs,
+            ed.name.to_owned(),
+            &ed.extern_name,
+            arity,
+        ));
     }
 
     fn func_instructions_generate(
@@ -192,10 +220,47 @@ impl<'ctx> LLVMGenerator<'ctx> {
         self.gc.builder.build_return(None);
     }
 
+    fn extern_func_instructions_generate(
+        &self,
+        extern_func: &ExternFunc<'ctx>
+    ) {
+        self.gc
+            .builder
+            .position_at_end(extern_func.internal_func.get_last_basic_block().unwrap());
+        for _ in 0..extern_func.arity {
+            self.generate_llvm(&Instruction::Push(extern_func.arity - 1), extern_func.internal_func);
+            self.generate_llvm(&Instruction::Eval, extern_func.internal_func);
+        }
+        let gmachine_ptr = extern_func.internal_func.get_first_param().unwrap();
+        let args = {
+            let mut args = Vec::with_capacity(extern_func.arity + 1);
+            args.push(gmachine_ptr.into());
+            for _ in 0..extern_func.arity {
+                args.push(self.gc.create_pop(extern_func.internal_func).into())
+            }
+            args
+        };
+        print!("extern name: {}", extern_func.external_name);
+        let res = self
+            .gc
+            .builder
+            .build_call(extern_func.external_func, &args, &extern_func.external_name)
+            .try_as_basic_value()
+            .left()
+            .unwrap();
+        self.gc.create_push(extern_func.internal_func, res);
+        self.generate_llvm(&Instruction::Update(extern_func.arity), extern_func.internal_func);
+        self.generate_llvm(&Instruction::Pop(extern_func.arity), extern_func.internal_func);
+        self.gc.builder.build_return(None);
+    }
+
     fn define_internal_binop(&mut self, op: BinOpType) {
-        let new_func = self.gc.create_custom_func(
-            &mut self.custom_funcs, op.action(), 2);
-        self.gc.builder.position_at_end(new_func.get_last_basic_block().unwrap());
+        let new_func = self
+            .gc
+            .create_custom_func(&mut self.custom_funcs, op.action(), 2);
+        self.gc
+            .builder
+            .position_at_end(new_func.get_last_basic_block().unwrap());
 
         [
             Instruction::Push(1),
@@ -205,25 +270,48 @@ impl<'ctx> LLVMGenerator<'ctx> {
             Instruction::BinOp(op),
             Instruction::Update(2),
             Instruction::Pop(2),
-        ].into_iter().for_each(|instruction| self.generate_llvm(instruction, new_func));
+        ]
+        .iter()
+        .for_each(|instruction| self.generate_llvm(instruction, new_func));
 
         self.gc.builder.build_return(None);
     }
 
-    pub fn generate(&mut self, p: &Program, insns: &Vec<Vec<Instruction>>, ir_out_file: Option<&str>, bin_out_file: &str) -> Result<(), String> {
+    pub fn generate(
+        &mut self,
+        p: &Program,
+        insns: &Vec<(String, Vec<Instruction>)>,
+        ir_out_file: Option<&str>,
+        bin_out_file: &str,
+    ) -> Result<(), String> {
         [
             BinOpType::Plus,
             BinOpType::Minus,
             BinOpType::Times,
             BinOpType::Divide,
-        ].into_iter().for_each(|op| self.define_internal_binop(*op));
+        ]
+        .iter()
+        .for_each(|op| self.define_internal_binop(*op));
 
-        for defn in p.defns.iter() {
-            self.init_functions(defn);
+        for (_, type_defn) in &p.type_defns {
+            self.type_generate_llvm(type_defn);
         }
 
-        for (func_insns, generated_func) in insns.iter().zip(self.generated_funcs.iter()) {
+        for (func_name, _) in insns {
+            let func_defn = p.func_defns.get(func_name).unwrap();
+            self.func_declare_llvm(func_defn);
+        }
+
+        for (_, extern_decl) in p.extern_decls.iter() {
+            self.extern_func_declare_llvm(extern_decl)
+        }
+
+        for ((_, func_insns), generated_func) in insns.iter().zip(self.generated_funcs.iter()) {
             self.func_instructions_generate(func_insns, *generated_func);
+        }
+
+        for extern_func in &self.extern_funcs {
+            self.extern_func_instructions_generate(extern_func)
         }
 
         if let Some(ir_file) = ir_out_file {
@@ -239,20 +327,27 @@ impl<'ctx> LLVMGenerator<'ctx> {
 
         Target::initialize_native(&init_config)?;
         let target = Target::from_triple(&default_triple).map_err(|l| l.to_string())?;
-        let target_machine = target.create_target_machine(&default_triple, 
-            "generic", 
-            "", 
-            OptimizationLevel::Default, 
-            RelocMode::Default, 
-            CodeModel::Default).expect("failed to create generic target machine");
+        let target_machine = target
+            .create_target_machine(
+                &default_triple,
+                "generic",
+                "",
+                OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .expect("failed to create generic target machine");
 
-        self.gc.module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+        self.gc
+            .module
+            .set_data_layout(&target_machine.get_target_data().get_data_layout());
         self.gc.module.set_triple(&default_triple);
 
         self.gc.module.verify().map_err(|l| l.to_string())?;
 
-        target_machine.write_to_file(&self.gc.module, FileType::Object, &Path::new(bin_out_file))
-        .map_err(|l|l.to_string())?;
+        target_machine
+            .write_to_file(&self.gc.module, FileType::Object, &Path::new(bin_out_file))
+            .map_err(|l| l.to_string())?;
 
         Ok(())
     }

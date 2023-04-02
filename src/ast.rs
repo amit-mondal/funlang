@@ -1,7 +1,12 @@
 
 use std::rc::Rc;
-use crate::types::Type;
+use std::cell::RefCell;
+use std::collections::{HashSet, HashMap};
+use crate::types::{Type, TypeData};
 use crate::types::type_visit::TypeVisitor;
+use crate::types::type_env::TypeEnv;
+use crate::types::free_var_visit::FreeVarVisitor;
+use id_arena::Id;
 
 pub type ASTBox<'input> = Box<dyn AST + 'input>;
 
@@ -13,28 +18,68 @@ pub trait Visitor {
 }
 
 pub trait AST: std::fmt::Debug {
-    fn type_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
-        let ast_type = self.typegen_accept(tv);
-        self.set_type(Rc::clone(&ast_type));
-        ast_type
-    }
-    fn typegen_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type>;     
-    fn set_type(&mut self, t: Rc<Type>);
-    fn get_type(&self) -> Option<Rc<Type>>;
+    fn type_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type>;
     fn accept(&mut self, v: &mut dyn Visitor);
+    fn get_type_env(&self) -> Option<Id<TypeEnv>>;
 }
 
 #[derive(Debug)]
-pub struct TypeConstructor<'input> {
+pub enum TypeTerm<'input> {
+    Base(&'input str),
+    Nested(TypeDeclaration<'input>)
+}
+
+impl<'input> TypeTerm<'input> {
+    fn to_type(&self, v: &FreeVarVisitor) -> Result<Rc<Type>, String> {
+        match self {
+            Self::Base(type_name) =>
+                v.env_stack.lookup_type(&(*type_name).to_owned()).ok_or(format!("Could not find type {} in external type declaration", *type_name)),
+            Self::Nested(typedecl) => typedecl.to_type(v)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ExternDecl<'input> {
+    pub name: &'input str,
+    pub extern_name: String,
+    pub type_decl: TypeDeclaration<'input>
+}
+
+impl<'input> ExternDecl<'input> {
+    pub fn to_type(&self, v: &FreeVarVisitor) -> Result<Rc<Type>, String> {
+        self.type_decl.to_type(v)
+    }
+}
+
+#[derive(Debug)]
+pub struct TypeDeclaration<'input> {
+    pub arrow_separated: Vec<TypeTerm<'input>>
+}
+
+impl<'input> TypeDeclaration<'input> {
+    fn to_type_helper(terms: &[TypeTerm], v: &FreeVarVisitor) -> Result<Rc<Type>, String> {
+        match terms {
+            [] => Err("Type declaration is empty".to_owned()),
+            [ hd ] => hd.to_type(v),
+            [ hd, tl@..] => {
+                let lhs_type = hd.to_type(v)?;
+                let rhs_type = Self::to_type_helper(tl, v)?;
+                Ok(Rc::new(Type::Function(lhs_type, rhs_type)))
+            }
+        }
+    }
+
+    fn to_type(&self, v: &FreeVarVisitor) -> Result<Rc<Type>, String> {
+        Self::to_type_helper(&self.arrow_separated[..], v)
+    }
+}
+
+#[derive(Debug)]
+pub struct VariantConstructor<'input> {
     pub name: &'input str,
     pub types: Vec<&'input str>,
     pub tag: i32
-}
-
-#[derive(Debug)]
-pub struct TypeDefinition<'input> {
-    pub name: &'input str,
-    pub constructors: Vec<TypeConstructor<'input>>
 }
 
 
@@ -42,6 +87,23 @@ pub struct TypeDefinition<'input> {
 pub enum Pattern<'input> {
     Var(&'input str),
     Constr(&'input str, Vec<&'input str>)
+}
+
+impl<'input> Pattern<'input> {
+    pub fn insert_bindings(&self, fv: &mut FreeVarVisitor) {
+        match self {
+            Pattern::Var(name) => {
+                let new_type = Rc::new(fv.pg.new_placeholder());
+                fv.env_stack.bind_from_type((*name).to_owned(), new_type);
+            }
+            Pattern::Constr(_, params) => {
+                for param in params {
+                    let new_type = Rc::new(fv.pg.new_placeholder());
+                    fv.env_stack.bind_from_type((*param).to_owned(), new_type);
+                }
+            }
+        }
+    }
 }
 
 
@@ -56,65 +118,58 @@ pub struct Branch<'input> {
 pub struct App<'input> {
     pub left: ASTBox<'input>,
     pub right: AppBase<'input>,
-    pub mtype: Option<Rc<Type>>
+    pub mtype: Option<Rc<Type>>,
+    pub mtype_env: Option<Id<TypeEnv>>
 }
 
-impl<'input> AST for App<'input> {
-    fn set_type(&mut self, t: Rc<Type>) {
-        self.mtype = Some(t)
+impl<'input> App<'input> {
+    pub fn new(left: ASTBox<'input>, right: AppBase<'input>) -> App<'input> {
+        App {left, right, mtype: None, mtype_env: None}
     }
+}
 
-    fn get_type(&self) -> Option<Rc<Type>> {
-        self.mtype.as_ref().map(|t| Rc::clone(t))
-            //Rc::clone(self.mtype.as_ref().unwrap())
-    }
-    
-    fn typegen_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
+impl<'input> AST for App<'input> {    
+    fn type_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
         tv.visit_app(self)
     }
 
     fn accept(&mut self, v: &mut dyn Visitor) {
         v.visit_app(self)
     }
+
+    fn get_type_env(&self) -> Option<Id<TypeEnv>> {
+        self.mtype_env
+    }
 }
 
-
 #[derive(Debug)]
-pub enum AppBase<'input> {
+pub enum AppBaseData<'input> {
     Int(i32),
-    LowerId(&'input str, Option<Rc<Type>>),
-    UpperId(&'input str, Option<Rc<Type>>),
+    String(String),
+    LowerId(&'input str),
+    UpperId(&'input str),
     Expr(ASTBox<'input>),
     Match(ASTBox<'input>)
 }
 
-impl<'input> AST for AppBase<'input> {
-    fn set_type(&mut self, t: Rc<Type>) {
-        match self {
-            AppBase::LowerId(_, mtype) => *mtype = Some(t),
-            AppBase::UpperId(_, mtype) => *mtype = Some(t),
-            AppBase::Expr(expr) => expr.set_type(t),
-            AppBase::Match(matchexpr) => matchexpr.set_type(t),
-            _ => ()
-        }
-    }
+#[derive(Debug)]
+pub struct AppBase<'input> {
+    pub data: AppBaseData<'input>,
+    pub mtype: Option<Rc<Type>>,
+    pub mtype_env: Option<Id<TypeEnv>>
+}
 
-    fn get_type(&self) -> Option<Rc<Type>> {
-        match self {
-            AppBase::Int(_) => Some(Rc::new(Type::Base(String::from("Int"), None))),
-            AppBase::LowerId(_, mtype) => mtype.as_ref().map(|t| Rc::clone(t)),
-            AppBase::UpperId(_, mtype) => mtype.as_ref().map(|t| Rc::clone(t)),
-            AppBase::Expr(expr) => expr.get_type(),
-            AppBase::Match(matchexpr) => matchexpr.get_type()
-        }       
-    }
-    
-    fn typegen_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
+impl<'input> AST for AppBase<'input> {
+    fn type_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
         tv.visit_appbase(self)
     }
 
     fn accept(&mut self, v: &mut dyn Visitor) {
         v.visit_appbase(self)
+    }
+
+    fn get_type_env(&self) -> Option<Id<TypeEnv>> {
+        self.mtype_env
     }
 }
 
@@ -152,26 +207,30 @@ pub struct BinOp<'input> {
     pub kind: BinOpType,
     pub lhs: ASTBox<'input>,
     pub rhs: ASTBox<'input>,
-    pub mtype: Option<Rc<Type>>
+    pub mtype: Option<Rc<Type>>,
+    pub mtype_env: Option<Id<TypeEnv>>
+}
+
+impl<'input> BinOp<'input> {
+    pub fn new(kind: BinOpType, lhs: ASTBox<'input>, rhs: ASTBox<'input>) -> BinOp<'input> {
+        BinOp {
+            kind, lhs, rhs, mtype: None, mtype_env: None
+        }
+    }
 }
 
 impl<'input> AST for BinOp<'input> {
-    fn set_type(&mut self, t: Rc<Type>) {
-        self.mtype = Some(t);
-    }
-
-    fn get_type(&self) -> Option<Rc<Type>> {    
-        //Rc::clone(self.mtype.as_ref().unwrap())
-        self.mtype.as_ref().map(|t| Rc::clone(t))  
-    }
-    
-    fn typegen_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
+    fn type_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
         tv.visit_binop(self)
     }
 
     fn accept(&mut self, v: &mut dyn Visitor) {
         v.visit_binop(self)
-    }    
+    }
+
+    fn get_type_env(&self) -> Option<Id<TypeEnv>> {
+        self.mtype_env
+    }
 }
 
 
@@ -179,25 +238,80 @@ impl<'input> AST for BinOp<'input> {
 pub struct Match<'input> {
     pub expr: ASTBox<'input>,
     pub branches: Vec<Branch<'input>>,
-    pub mtype: Option<Rc<Type>>
+    pub input_type: Option<Rc<Type>>,
+    pub mtype_env: Option<Id<TypeEnv>>
 }
 
-impl<'input> AST for Match<'input> {
-    fn set_type(&mut self, t: Rc<Type>) {
-        self.mtype = Some(t);
+impl<'input> Match<'input> {
+    pub fn new(expr: ASTBox<'input>, branches: Vec<Branch<'input>>) -> Match<'input> {
+        Match {expr, branches, input_type: None, mtype_env: None}
     }
+}
 
-    fn get_type(&self) -> Option<Rc<Type>> {
-        //Rc::clone(self.mtype.as_ref().unwrap())
-        self.mtype.as_ref().map(|t| Rc::clone(t))
-    }
-    
-    fn typegen_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
+impl<'input> AST for Match<'input> {    
+    fn type_accept(&mut self, tv: &mut TypeVisitor) -> Rc<Type> {
         tv.visit_match(self)
     }
 
     fn accept(&mut self, v: &mut dyn Visitor) {
         v.visit_match(self)
+    }
+
+    fn get_type_env(&self) -> Option<Id<TypeEnv>> {
+        self.mtype_env
+    }
+}
+
+
+#[derive(Debug)]
+pub struct VariantDefinition<'input> {
+    pub name: &'input str,
+    pub constructors: Vec<VariantConstructor<'input>>,
+    pub mtype_env: Option<Id<TypeEnv>>
+}
+
+impl<'input> VariantDefinition<'input> {
+    pub fn new(name: &'input str, constructors: Vec<VariantConstructor<'input>>) -> VariantDefinition<'input> {
+        VariantDefinition{name, constructors, mtype_env: None}
+    }
+
+    pub fn insert_types(&mut self, v: &mut FreeVarVisitor) {
+        self.mtype_env = Some(v.env_stack.curr_env_id().unwrap());
+        let this_type = Rc::new(
+            Type::Base(self.name.to_owned(), 
+            Some(RefCell::new(TypeData::new()))));
+        v.env_stack.bind_type(self.name.to_owned(), this_type);
+    }
+
+    pub fn insert_constructors(&mut self, v: &mut FreeVarVisitor) {
+        let return_type = v.env_stack.lookup_type(&self.name.to_owned()).unwrap();
+        /* This if-statement always evaluates to true. It's only needed to get at the internals of
+           the return_type variable we just made */
+        if let Type::Base(_, Some(type_data)) = &*Rc::clone(&return_type) {
+            let mut curr_tag = 0;               
+            for constructor in self.constructors.iter_mut() {
+                /* Store unique tag for each constructor in the Type enum itself */
+                constructor.tag = curr_tag;
+                type_data.borrow_mut().constr_tags.insert(constructor.name.to_owned(), curr_tag);
+                curr_tag += 1;
+                
+                let mut full_type = Rc::clone(&return_type);
+                /* Type parameters are read in forward, so we must iterate backwards to
+                create a right-recursive type definition for the full type */
+                for type_name in constructor.types.iter().rev() {
+                    //let curr_type = Rc::new(Type::Base((*type_name).to_owned(), None));
+                    if let Some(curr_type) = v.env_stack.lookup_type(&(*type_name).to_owned()) {
+                        full_type = Rc::new(Type::Function(Rc::clone(&curr_type), full_type));
+                    } else {
+                        panic!("expected {} to be defined in typecheck context", type_name)
+                    }
+                }
+
+                v.env_stack.bind_from_type(constructor.name.to_owned(), full_type);
+            }
+        } else {
+            panic!("expected Base(_, Some(_)), got {:?}", return_type);             
+        }
     }
 }
 
@@ -208,17 +322,42 @@ pub struct FuncDefinition<'input> {
     pub params: Vec<&'input str>,
     pub body: ASTBox<'input>,
     pub return_type: Option<Rc<Type>>,
-    pub param_types: Vec<Rc<Type>>
+    pub full_type: Option<Rc<Type>>,
+    pub param_types: Vec<Rc<Type>>,
+    pub mtype_env: Option<Id<TypeEnv>>,
+    pub var_mtype_env: Option<Id<TypeEnv>>,
+    pub free_vars: HashSet<String>
+}
+
+impl<'input> FuncDefinition<'input> {
+    pub fn new(name: &'input str, params: Vec<&'input str>, body: ASTBox<'input>) -> FuncDefinition<'input> {
+        FuncDefinition {name, params, body, 
+            return_type: None,
+            full_type: None,
+            param_types: Vec::new(), 
+            mtype_env: None,
+            var_mtype_env: None,
+            free_vars: HashSet::new()
+        }
+    }
+
+    pub fn insert_types(&self, v: &mut FreeVarVisitor) {
+        let full_type = Rc::clone(self.full_type.as_ref().unwrap());
+        v.env_stack.bind_from_type((*self.name).to_owned(), full_type);
+    }
 }
 
 #[derive(Debug)]
 pub enum Definition<'input> {
     Func(FuncDefinition<'input>),
-    Type(TypeDefinition<'input>)
+    ExternFunc(ExternDecl<'input>),
+    Variant(VariantDefinition<'input>)
 }
 
 #[derive(Debug)]
 pub struct Program<'input> {
-    pub defns: Vec<Definition<'input>>
+    pub func_defns: HashMap<String, FuncDefinition<'input>>,
+    pub extern_decls: HashMap<String, ExternDecl<'input>>,
+    pub type_defns: HashMap<String, VariantDefinition<'input>>
 }
 

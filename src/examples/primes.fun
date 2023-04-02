@@ -2,14 +2,7 @@ type List = { Nil, Cons Nat List }
 type Bool = { True, False }
 type Nat = { O, S Nat }
 
-fun ifN c t e = {
-    match c with {
-        True => { t }
-        False => { e }
-    }
-}
-
-fun ifL c t e = {
+fun if c t e = {
     match c with {
         True => { t }
         False => { e }
@@ -55,7 +48,7 @@ fun minus n m = {
 }
 
 fun mod n m = {
-    ifN (lte m n) (mod (minus n m) m) n
+    if (lte m n) (mod (minus n m) m) n
 }
 
 fun notDivisibleBy n m = {
@@ -68,7 +61,7 @@ fun notDivisibleBy n m = {
 fun filter f l = {
     match l with {
         Nil => { Nil }
-        Cons x xs => { ifL (f x) (Cons x (filter f xs)) (filter f xs) }
+        Cons x xs => { if (f x) (Cons x (filter f xs)) (filter f xs) }
     }
 }
 

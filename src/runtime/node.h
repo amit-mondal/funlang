@@ -11,6 +11,7 @@ struct stack;
 enum node_kind {
 		NODE_APP = 0,
 		NODE_NUM,
+        NODE_STR,
 		NODE_GLOBAL,
 		NODE_IND,
 		NODE_DATA
@@ -31,6 +32,12 @@ struct node_app {
 struct node_num {
     struct node_base base;
     int32_t val;
+};
+
+struct node_str {
+    struct node_base base;
+    size_t len;
+    char* val;
 };
 
 struct node_global {

@@ -1,6 +1,6 @@
 use super::compile_visit::CompileVisitor;
 use super::instructions::Instruction;
-use crate::ast::{Definition, FuncDefinition, Program};
+use crate::ast::{FuncDefinition, Program};
 
 pub struct CompileContext {
     visitor: CompileVisitor
@@ -16,15 +16,11 @@ impl CompileContext {
         CompileContext { visitor: cv }
     }
 
-    pub fn compile(&mut self, p: &mut Program) -> Vec<Vec<Instruction>> {
+    pub fn compile(&mut self, p: &mut Program) -> Vec<(String, Vec<Instruction>)> {
         let mut res = Vec::new();
-
-        for def in p.defns.iter_mut() {
-            if let Definition::Func(fd) = def {
-                res.push(self.compile_func_definition(fd))
-            }
+        for (_, func_defn) in &mut p.func_defns {
+            res.push((func_defn.name.to_owned(), self.compile_func_definition(func_defn)));
         }
-
         res
     }
     

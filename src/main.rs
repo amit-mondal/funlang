@@ -14,7 +14,7 @@ use std::fs;
 use types::typecheck::TypecheckContext;
 use graph::compile::CompileContext;
 use inkwell::context::Context;
-use codegen::llvm_gen::{self, LLVMGenerator};
+use codegen::llvm_gen::LLVMGenerator;
 
 
 
@@ -55,7 +55,6 @@ fn main() {
         expect(&format!("Failed to read input file {}", source_file));
 
     let mut tree = fun::ProgramParser::new().parse(&source).unwrap();
-
     TypecheckContext::new().typecheck(&mut tree);
     let instructions = CompileContext::new().compile(&mut tree);
 

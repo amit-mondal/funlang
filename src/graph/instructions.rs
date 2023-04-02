@@ -17,6 +17,7 @@ impl JumpInstruction {
 #[derive(Debug)]
 pub enum Instruction {
     PushInt(i32),
+    PushString(String),
     PushGlobal(String),
     Push(usize),
     Pop(usize),

@@ -1,18 +1,21 @@
+use super::instructions::{Instruction, JumpInstruction};
+use super::stack_env::{OffsetEnv, StackEnv, VarEnv};
+use super::SemanticError;
 use crate::ast::*;
 use crate::types::Type;
-use super::SemanticError;
-use super::stack_env::{StackEnv, OffsetEnv, VarEnv};
-use super::instructions::{Instruction, JumpInstruction};
+use std::rc::Rc;
 
 pub struct CompileVisitor {
     insn_stack: Vec<Vec<Instruction>>,
-    curr_env: Option<Box<dyn StackEnv>>
+    curr_env: Option<Box<dyn StackEnv>>,
 }
-
 
 impl CompileVisitor {
     pub fn new() -> CompileVisitor {
-        CompileVisitor { insn_stack: Vec::new(), curr_env: None }
+        CompileVisitor {
+            insn_stack: Vec::new(),
+            curr_env: None,
+        }
     }
 
     pub fn env_get_offset(&self, name: &str) -> Option<usize> {
@@ -48,19 +51,23 @@ impl CompileVisitor {
 }
 
 impl Visitor for CompileVisitor {
-    
     fn visit_appbase(&mut self, ab: &mut AppBase) {
-        match ab {
-            AppBase::Int(i) => self.insns().push(Instruction::PushInt(*i)),
-            AppBase::LowerId(name, _) =>
-                    if let Some(offset) = self.env_get_offset(name) {
-                        self.insns().push(Instruction::Push(offset))
-                    } else {
-                        self.insns().push(Instruction::PushGlobal((*name).to_owned()))
-                    },
-            AppBase::UpperId(name, _) => self.insns().push(Instruction::PushGlobal((*name).to_owned())),
-            AppBase::Expr(expr) => expr.accept(self),
-            AppBase::Match(matchexpr) => matchexpr.accept(self)
+        match &mut ab.data {
+            AppBaseData::Int(i) => self.insns().push(Instruction::PushInt(*i)),
+            AppBaseData::String(s) => self.insns().push(Instruction::PushString(s.clone())),
+            AppBaseData::LowerId(name) => {
+                if let Some(offset) = self.env_get_offset(name) {
+                    self.insns().push(Instruction::Push(offset))
+                } else {
+                    self.insns()
+                        .push(Instruction::PushGlobal((*name).to_owned()))
+                }
+            }
+            AppBaseData::UpperId(name) => self
+                .insns()
+                .push(Instruction::PushGlobal((*name).to_owned())),
+            AppBaseData::Expr(expr) => expr.accept(self),
+            AppBaseData::Match(matchexpr) => matchexpr.accept(self),
         }
     }
 
@@ -68,7 +75,7 @@ impl Visitor for CompileVisitor {
         bo.rhs.accept(self);
         self.push_offset_env(1);
         bo.lhs.accept(self);
-        self.pop_env(); 
+        self.pop_env();
         self.insns().push(Instruction::PushGlobal(bo.kind.action()));
         self.insns().push(Instruction::MkApp);
         self.insns().push(Instruction::MkApp);
@@ -83,13 +90,13 @@ impl Visitor for CompileVisitor {
     }
 
     fn visit_match(&mut self, m: &mut Match) {
-        let expr_type = m.expr.get_type().unwrap();
+        let expr_type = Rc::clone(m.input_type.as_ref().unwrap());
         /* This should always be true, the typechecking pass ensures that match expression types
         are base types with valid pattern constructors */
         if let Type::Base(type_name, Some(type_data)) = &*expr_type {
             m.expr.accept(self);
             self.insns().push(Instruction::Eval);
-            
+
             //let mut jump_insn = self.insns().last_mut().unwrap();
             let placeholder_idx = self.insns().len();
             self.insns().push(Instruction::JumpPlaceholder);
@@ -108,7 +115,9 @@ impl Visitor for CompileVisitor {
                             if jump_insn.tag_mappings.contains_key(&tag) {
                                 break;
                             } else {
-                                jump_insn.tag_mappings.insert(*tag, jump_insn.branches.len());
+                                jump_insn
+                                    .tag_mappings
+                                    .insert(*tag, jump_insn.branches.len());
                             }
                         }
                     }
@@ -125,25 +134,42 @@ impl Visitor for CompileVisitor {
                         }
 
                         self.insns().push(Instruction::Slide(params.len()));
-                        
+
                         let type_data_ref = type_data.borrow();
-                        let new_tag = type_data_ref.constr_tags.get(&(*constr_name).to_owned()).unwrap();
+                        let new_tag = type_data_ref
+                            .constr_tags
+                            .get(&(*constr_name).to_owned())
+                            .unwrap();
                         if jump_insn.tag_mappings.contains_key(new_tag) {
-                            let _: () = Err(SemanticError{msg: format!("cannot reach pattern \"{}\" because it is a duplicate pattern", constr_name)}).unwrap();
+                            let _: () = Err(SemanticError {
+                                msg: format!(
+                                    "cannot reach pattern \"{}\" because it is a duplicate pattern",
+                                    constr_name
+                                ),
+                            })
+                            .unwrap();
                         }
 
-                        jump_insn.tag_mappings.insert(*new_tag, jump_insn.branches.len());
-                    }               
+                        jump_insn
+                            .tag_mappings
+                            .insert(*new_tag, jump_insn.branches.len());
+                    }
                 }
                 jump_insn.branches.push(self.pop_insns().unwrap());
             }
-            
+
             for (constr_name, tag) in type_data.borrow().constr_tags.iter() {
                 if !jump_insn.tag_mappings.contains_key(tag) {
-                    let _: () = Err(SemanticError{msg: format!("match on type {} does not contain the pattern {}", type_name, constr_name)}).unwrap();
+                    let _: () = Err(SemanticError {
+                        msg: format!(
+                            "match on type {} does not contain the pattern {}",
+                            type_name, constr_name
+                        ),
+                    })
+                    .unwrap();
                 }
             }
-            
+
             // Replace the jump instruction placeholder now that we're done making the instruction.
             self.insns()[placeholder_idx] = Instruction::Jump(jump_insn);
         } else {

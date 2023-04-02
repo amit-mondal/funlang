@@ -1,6 +1,6 @@
 
 CC = gcc
-CFLAGS = -fPIE -Wall -Wextra -O3
+CFLAGS = -fPIE -Wall -Wextra -g -O0
 
 runtime.o: RUNTIME_SOURCES
 

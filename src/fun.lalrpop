@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::collections::HashMap;
 use crate::ast::*;
 
 grammar;
@@ -9,68 +10,118 @@ CommaNonEmpty<T>: Vec<T> = <v:(<T> ",")*> <e:T> => {
     v
 };
 
+ArrowNonEmpty<T>: Vec<T> = <v:(<T> "->")*> <e:T> => {
+    let mut v = v;
+    v.push(e);
+    v
+};
 
-pub Program: Program<'input> = <d:Definitions> => Program{defns: d};
+
+pub Program: Program<'input> = <d:Definitions> => {
+    let mut func_defns = HashMap::new();
+    let mut type_defns = HashMap::new();
+    let mut extern_decls = HashMap::new();
+    for defn in d {
+        match defn {
+            Definition::Func(f) => {
+                func_defns.insert(f.name.to_owned(), f);
+            },
+            Definition::ExternFunc(e) => {
+                extern_decls.insert(e.name.to_owned(), e);
+            },
+            Definition::Variant(t) => {
+                type_defns.insert(t.name.to_owned(), t);
+            }
+        }
+    }
+    Program {func_defns, extern_decls, type_defns}
+};
 
 pub Definitions = Definition+;
 
-pub Definition: Definition<'input> = {
-    <f:FuncDefinition> => Definition::Func(f),
-    <t:TypeDefinition> => Definition::Type(t)
-}
+LowerId: &'input str = r"[a-z][a-zA-Z0-9_]*" => <>;
+LowerParams = LowerId*;
 
 pub FuncDefinition: FuncDefinition<'input> = "fun" <n:LowerId> <p:LowerParams> "=" "{" <b:Expr> "}" =>
-    FuncDefinition{name: n, params: p, body: b, return_type: None, param_types: Vec::new()};
+    FuncDefinition::new(n, p, b);
 
 pub Expr: ASTBox<'input> = {
-    <e:Expr> "+" <t:Term> => Box::new(BinOp{kind: BinOpType::Plus, lhs: e, rhs: t, mtype: None}),
-    <e:Expr> "-" <t:Term> => Box::new(BinOp{kind: BinOpType::Minus, lhs: e, rhs: t, mtype: None}),
+    <e:Expr> "+" <t:Term> => Box::new(BinOp::new(BinOpType::Plus, e, t)),
+    <e:Expr> "-" <t:Term> => Box::new(BinOp::new(BinOpType::Minus, e, t)),
     <t:Term> => t
-}
+};
 
 pub Term: ASTBox<'input> = {
-    <t:Term> "*" <a:App> => Box::new(BinOp{kind: BinOpType::Times, lhs: t, rhs: a, mtype: None}),
-    <t:Term> "/" <a:App> => Box::new(BinOp{kind: BinOpType::Divide, lhs: t, rhs: a, mtype: None}),
+    <t:Term> "*" <a:App> => Box::new(BinOp::new(BinOpType::Times, t, a)),
+    <t:Term> "/" <a:App> => Box::new(BinOp::new(BinOpType::Divide, t, a)),
     <a:App> => a
 }
 
-pub App: ASTBox<'input> = {
-    <a:App> <b:AppBase> => Box::new(App{left: a, right: b, mtype: None}),
-    <b: AppBase> => Box::new(b)
+UpperId: &'input str = r"[A-Z][a-zA-Z0-9_]*" => <>;
+UpperParams = UpperId*;
+
+pub VariantConstructor: VariantConstructor<'input> = <n:UpperId> <t:UpperParams> =>
+    VariantConstructor{name: n, types: t, tag: -1};
+
+pub VariantConstructors = CommaNonEmpty<VariantConstructor>;
+
+pub VariantDefinition: VariantDefinition<'input>= "type" <n:UpperId> "=" "{" <c:VariantConstructors> "}" =>
+    VariantDefinition::new(n, c);
+
+pub Definition: Definition<'input> = {
+    <f:FuncDefinition> => Definition::Func(f),
+    <t:VariantDefinition> => Definition::Variant(t),
+    <e:ExternFuncDeclaration> => Definition::ExternFunc(e)
 }
 
-pub AppBase: AppBase<'input> = {
-    <i:Int> => AppBase::Int(i),
-    <l:LowerId> => AppBase::LowerId(l, None),
-    <u:UpperId> => AppBase::UpperId(u, None),
-    "(" <e:Expr> ")" => AppBase::Expr(e),
-    <m:Match> => AppBase::Match(m)
-}
-
-pub Match: ASTBox<'input> = "match" <e: Expr> "with" "{" <b:Branches> "}" =>
-    Box::new(Match{expr: e, branches: b, mtype: None}); 
+pub AppBase: AppBase<'input> = <ad:AppBaseData> => AppBase{data: ad, mtype: None, mtype_env: None};
 
 pub Branches = Branch+;
-
-pub Branch: Branch<'input> = <p:Pattern> "=>" "{" <e:Expr> "}" => Branch{pat: p, expr: e};
 
 pub Pattern: Pattern<'input> = {
     <n:LowerId> => Pattern::Var(n),
     <c:UpperId> <p:LowerParams> => Pattern::Constr(c, p)
 }
 
-pub TypeDefinition: TypeDefinition<'input>= "type" <n:UpperId> "=" "{" <c:TypeConstructors> "}" =>
-    TypeDefinition{name: n, constructors: c};
+pub Branch: Branch<'input> = <p:Pattern> "=>" "{" <e:Expr> "}" => Branch{pat: p, expr: e};
 
-pub TypeConstructors = CommaNonEmpty<TypeConstructor>;
-
-pub TypeConstructor: TypeConstructor<'input> = <n:UpperId> <t:UpperParams> =>
-    TypeConstructor{name: n, types: t, tag: -1};
-
-UpperParams = UpperId*;
-LowerParams = LowerId*;
-
-UpperId: &'input str = r"[A-Z][a-zA-Z0-9_]*" => <>;
-LowerId: &'input str = r"[a-z][a-zA-Z0-9_]*" => <>;
+pub Match: ASTBox<'input> = "match" <e: Expr> "with" "{" <b:Branches> "}" =>
+    Box::new(Match::new(e, b));
 
 Int: i32 = <s:r"[0-9]+"> => i32::from_str(s).unwrap();
+
+pub AppBaseData: AppBaseData<'input> = {
+    <i:Int> => AppBaseData::Int(i),
+    <s:StringLiteral> => AppBaseData::String(s),
+    <l:LowerId> => AppBaseData::LowerId(l),
+    <u:UpperId> => AppBaseData::UpperId(u),
+    "(" <e:Expr> ")" => AppBaseData::Expr(e),
+    <m:Match> => AppBaseData::Match(m)
+}
+
+pub App: ASTBox<'input> = {
+    <a:App> <b:AppBase> => Box::new(App::new(a, b)),
+    <b: AppBase> => Box::new(b)
+}
+
+pub ExternFuncDeclaration: ExternDecl<'input> = "extern" "fun" <name:LowerId> ":" <type_decl:TypeDeclaration> "=" <extern_name:StringLiteral> =>
+    ExternDecl {
+        name,
+        extern_name,
+        type_decl
+    };
+
+pub TypeTerm: TypeTerm<'input> = {
+    <i:UpperId> => TypeTerm::Base(i),
+    "(" <decl:TypeDeclaration> ")" => TypeTerm::Nested(decl)
+}
+
+TypeDeclaration: TypeDeclaration<'input> = <v:ArrowNonEmpty<TypeTerm>> =>
+    TypeDeclaration { arrow_separated : v };
+
+StringLiteral : String = <s:r#""([^"]|\\")*""#> => { 
+    let mut s = String::from(s);
+    s.pop();
+    s.remove(0);
+    s
+};

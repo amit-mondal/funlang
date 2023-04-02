@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::mem::size_of;
 
-use inkwell::builder::Builder;
+use inkwell::{builder::Builder, types::BasicMetadataTypeEnum};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{FunctionType, IntType, PointerType, StructType};
@@ -9,6 +9,13 @@ use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
 pub mod llvm_gen;
+
+pub struct ExternFunc<'ctx> {
+    internal_func: FunctionValue<'ctx>,
+    external_func: FunctionValue<'ctx>,
+    external_name: String,
+    arity: usize,
+}
 
 pub struct CustomFunc<'ctx> {
     func: FunctionValue<'ctx>,
@@ -25,6 +32,7 @@ struct GenContextTypes<'ctx> {
     node_ptr_type: PointerType<'ctx>,
     tag_type: IntType<'ctx>,
     func_type: FunctionType<'ctx>,
+    char_ptr_type: PointerType<'ctx>,
 }
 
 pub struct GenContext<'ctx> {
@@ -53,19 +61,34 @@ impl<'ctx> GenContext<'ctx> {
         let node_base = ctx.opaque_struct_type("node_base");
         let node_ptr_type = node_base.ptr_type(AddressSpace::Generic);
 
-        
-
         // Warning! For some reason moving the node_base set_body call into the array below will cause
         // unwrap_node_val calls to segfault. Presumably they must be set before any instances of node_base are
         // used.
-        node_base.set_body(&[ctx.i32_type().into(), ctx.i8_type().into(), node_ptr_type.into()], false);
+        node_base.set_body(
+            &[
+                ctx.i32_type().into(),
+                ctx.i8_type().into(),
+                node_ptr_type.into(),
+            ],
+            false,
+        );
         stack_type.set_body(
-            &[sizet_type.into(), sizet_type.into(), node_ptr_type.ptr_type(AddressSpace::Generic).into()],
-            false
+            &[
+                sizet_type.into(),
+                sizet_type.into(),
+                node_ptr_type.ptr_type(AddressSpace::Generic).into(),
+            ],
+            false,
         );
         gmachine_type.set_body(
-            &[stack_type.into(), node_ptr_type.into(), ctx.i64_type().into(), ctx.i64_type().into()],
-            false);
+            &[
+                stack_type.into(),
+                node_ptr_type.into(),
+                ctx.i64_type().into(),
+                ctx.i64_type().into(),
+            ],
+            false,
+        );
 
         let gmachine_ptr_type = gmachine_type.ptr_type(AddressSpace::Generic);
         let func_type = ctx.void_type().fn_type(&[gmachine_ptr_type.into()], false);
@@ -94,6 +117,8 @@ impl<'ctx> GenContext<'ctx> {
             struct_types.insert((*name).to_owned(), s);
         });
 
+        let char_ptr_type = ctx.i8_type().ptr_type(AddressSpace::Generic);
+
         GenContextTypes {
             sizet_type,
             struct_types,
@@ -104,8 +129,22 @@ impl<'ctx> GenContext<'ctx> {
             node_ptr_type,
             tag_type: ctx.i8_type(),
             func_type,
+            char_ptr_type,
         }
     }
+
+    /*
+    fn value_to_metadata_enum(value: BasicValueEnum<'ctx>) -> BasicMetadataValueEnum<'ctx> {
+        match value {
+            BasicValueEnum::ArrayValue(a) => BasicMetadataValueEnum::from(a),
+            BasicValueEnum::IntValue(i) => BasicMetadataValueEnum::from(i),
+            BasicValueEnum::FloatValue(f) => BasicMetadataValueEnum::from(f),
+            BasicValueEnum::PointerValue(p) => BasicMetadataValueEnum::from(p),
+            BasicValueEnum::StructValue(s) => BasicMetadataValueEnum::from(s),
+            BasicValueEnum::VectorValue(v) => BasicMetadataValueEnum::from(v)
+        }
+    }
+    */
 
     fn init_funcs(&mut self) {
         let ctx = self.ctx;
@@ -117,10 +156,17 @@ impl<'ctx> GenContext<'ctx> {
         let func_ptr_type = self.types.func_type.ptr_type(AddressSpace::Generic);
 
         let basic_stack_fn = |name| {
-            (name, void_type.fn_type(&[stack_ptr_type.into(), sizet_type.into()], false))};
+            (
+                name,
+                void_type.fn_type(&[stack_ptr_type.into(), sizet_type.into()], false),
+            )
+        };
 
         let basic_gmachine_fn = |name| {
-            (name, void_type.fn_type(&[gmachine_ptr_type.into(), sizet_type.into()], false))
+            (
+                name,
+                void_type.fn_type(&[gmachine_ptr_type.into(), sizet_type.into()], false),
+            )
         };
 
         [
@@ -154,6 +200,13 @@ impl<'ctx> GenContext<'ctx> {
                 node_ptr_type.fn_type(&[ctx.i32_type().into()], false),
             ),
             (
+                "alloc_str",
+                node_ptr_type.fn_type(
+                    &[self.types.char_ptr_type.into(), ctx.i32_type().into()],
+                    false,
+                ),
+            ),
+            (
                 "alloc_global",
                 node_ptr_type.fn_type(&[func_ptr_type.into(), ctx.i32_type().into()], false),
             ),
@@ -163,30 +216,37 @@ impl<'ctx> GenContext<'ctx> {
             ),
             (
                 "unwind",
-                void_type.fn_type(&[gmachine_ptr_type.into()], false)
+                void_type.fn_type(&[gmachine_ptr_type.into()], false),
             ),
             (
                 "gmachine_init",
-                void_type.fn_type(&[gmachine_ptr_type.into()], false)
+                void_type.fn_type(&[gmachine_ptr_type.into()], false),
             ),
             (
                 "gmachine_free",
-                void_type.fn_type(&[gmachine_ptr_type.into()], false)
+                void_type.fn_type(&[gmachine_ptr_type.into()], false),
             ),
             basic_gmachine_fn("gmachine_slide"),
             basic_gmachine_fn("gmachine_update"),
             basic_gmachine_fn("gmachine_alloc"),
             (
                 "gmachine_pack",
-                void_type.fn_type(&[gmachine_ptr_type.into(), sizet_type.into(), ctx.i8_type().into()], false)
+                void_type.fn_type(
+                    &[
+                        gmachine_ptr_type.into(),
+                        sizet_type.into(),
+                        ctx.i8_type().into(),
+                    ],
+                    false,
+                ),
             ),
             basic_gmachine_fn("gmachine_split"),
             (
                 "gmachine_track",
-                node_ptr_type.fn_type(&[gmachine_ptr_type.into(), node_ptr_type.into()], false)
-            )
+                node_ptr_type.fn_type(&[gmachine_ptr_type.into(), node_ptr_type.into()], false),
+            ),
         ]
-        .into_iter()
+        .iter()
         .for_each(|(name, func_type)| {
             let func = self
                 .module
@@ -225,8 +285,33 @@ impl<'ctx> GenContext<'ctx> {
             arity,
         };
         custom_funcs.insert(new_name, custom_func);
-
         new_func
+    }
+
+    pub fn create_extern_func(
+        &self,
+        custom_funcs: &mut HashMap<String, CustomFunc<'ctx>>,
+        internal_name: String,
+        external_name: &String,
+        arity: usize
+    ) -> ExternFunc<'ctx> {
+        let internal_func = self.create_custom_func(custom_funcs, internal_name, arity);
+        let param_types: Vec<BasicMetadataTypeEnum> = {
+            let mut types = Vec::with_capacity(arity + 1);
+            types.push(self.types.gmachine_ptr_type.into());
+            for _ in 0..arity {
+                types.push(self.types.node_ptr_type.into())
+            }
+            types
+        };
+        let extern_func_type = self.types.node_ptr_type.fn_type(&param_types, false);
+        let external_func = self.module.add_function(external_name, extern_func_type, Some(Linkage::External));
+        ExternFunc {
+            internal_func,
+            external_func,
+            external_name: external_name.clone(),
+            arity
+        }
     }
 
     pub fn create_i8(&self, i: i8) -> IntValue<'ctx> {
@@ -235,6 +320,14 @@ impl<'ctx> GenContext<'ctx> {
 
     pub fn create_i32(&self, i: i32) -> IntValue<'ctx> {
         self.ctx.i32_type().const_int(i as u64, true)
+    }
+
+    pub fn create_const_str_as_ptr(&self, s: &str) -> PointerValue<'ctx> {
+        // let vec_val = self.ctx.const_string(s.as_bytes(), false);
+        // self.builder.build_global_string(value, name)
+        self.builder
+            .build_global_string_ptr(s, "const_str")
+            .as_pointer_value()
     }
 
     pub fn create_size(&self, s: usize) -> IntValue<'ctx> {
@@ -248,19 +341,25 @@ impl<'ctx> GenContext<'ctx> {
 
     pub fn create_pop(&self, f: FunctionValue<'ctx>) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("stack_pop").unwrap();
-        let stack_ptr = self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
+        let stack_ptr =
+            self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
         self.builder
-            .build_call(*func, &[stack_ptr], "call_pop")
+            .build_call(*func, &[stack_ptr.into()], "call_pop")
             .try_as_basic_value()
             .left()
             .unwrap()
     }
 
-    pub fn create_peek(&self, f: FunctionValue<'ctx>, off: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+    pub fn create_peek(
+        &self,
+        f: FunctionValue<'ctx>,
+        off: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("stack_peek").unwrap();
-        let stack_ptr = self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
+        let stack_ptr =
+            self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
         self.builder
-            .build_call(*func, &[stack_ptr, off], "call_peek")
+            .build_call(*func, &[stack_ptr.into(), off.into()], "call_peek")
             .try_as_basic_value()
             .left()
             .unwrap()
@@ -268,20 +367,27 @@ impl<'ctx> GenContext<'ctx> {
 
     pub fn create_push(&self, f: FunctionValue<'ctx>, v: BasicValueEnum<'ctx>) {
         let func = self.funcs.get("stack_push").unwrap();
-        let stack_ptr = self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
-        self.builder.build_call(*func, &[stack_ptr, v], "call_push");
+        let stack_ptr =
+            self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
+        self.builder
+            .build_call(*func, &[stack_ptr.into(), v.into()], "call_push");
     }
 
     pub fn create_popn(&self, f: FunctionValue<'ctx>, off: BasicValueEnum<'ctx>) {
         let func = self.funcs.get("stack_popn").unwrap();
-        let stack_ptr = self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
+        let stack_ptr =
+            self.unwrap_gmachine_stack_ptr(f.get_first_param().unwrap().into_pointer_value());
         self.builder
-            .build_call(*func, &[stack_ptr, off], "call_popn");
+            .build_call(*func, &[stack_ptr.into(), off.into()], "call_popn");
     }
 
     pub fn create_update(&self, f: FunctionValue<'ctx>, off: BasicValueEnum<'ctx>) {
         let func = self.funcs.get("gmachine_update").unwrap();
-        self.builder.build_call(*func, &[f.get_first_param().unwrap(), off], "call_update");
+        self.builder.build_call(
+            *func,
+            &[f.get_first_param().unwrap().into(), off.into()],
+            "call_update",
+        );
     }
 
     pub fn create_pack(
@@ -291,31 +397,53 @@ impl<'ctx> GenContext<'ctx> {
         t: BasicValueEnum<'ctx>,
     ) {
         let func = self.funcs.get("gmachine_pack").unwrap();
-        self.builder
-            .build_call(*func, &[f.get_first_param().unwrap(), c, t], "call_pack");
+        self.builder.build_call(
+            *func,
+            &[f.get_first_param().unwrap().into(), c.into(), t.into()],
+            "call_pack",
+        );
     }
 
     pub fn create_split(&self, f: FunctionValue<'ctx>, c: BasicValueEnum<'ctx>) {
         let func = self.funcs.get("gmachine_split").unwrap();
-        self.builder
-            .build_call(*func, &[f.get_first_param().unwrap(), c], "call_split");
+        self.builder.build_call(
+            *func,
+            &[f.get_first_param().unwrap().into(), c.into()],
+            "call_split",
+        );
     }
 
     pub fn create_slide(&self, f: FunctionValue<'ctx>, off: BasicValueEnum<'ctx>) {
         let func = self.funcs.get("gmachine_slide").unwrap();
-        self.builder
-            .build_call(*func, &[f.get_first_param().unwrap(), off], "call_slide");
+        self.builder.build_call(
+            *func,
+            &[f.get_first_param().unwrap().into(), off.into()],
+            "call_slide",
+        );
     }
 
     pub fn create_alloc(&self, f: FunctionValue<'ctx>, n: BasicValueEnum<'ctx>) {
         let func = self.funcs.get("gmachine_alloc").unwrap();
-        self.builder
-            .build_call(*func, &[f.get_first_param().unwrap(), n], "call_alloc");
+
+        self.builder.build_call(
+            *func,
+            &[f.get_first_param().unwrap().into(), n.into()],
+            "call_alloc",
+        );
     }
 
-    pub fn create_track( &self, f: FunctionValue<'ctx>, n: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+    pub fn create_track(
+        &self,
+        f: FunctionValue<'ctx>,
+        n: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("gmachine_track").unwrap();
-        self.builder.build_call(*func, &[f.get_first_param().unwrap(), n], "call_track")
+        self.builder
+            .build_call(
+                *func,
+                &[f.get_first_param().unwrap().into(), n.into()],
+                "call_track",
+            )
             .try_as_basic_value()
             .left()
             .unwrap()
@@ -323,7 +451,8 @@ impl<'ctx> GenContext<'ctx> {
 
     pub fn create_unwind(&self, f: FunctionValue<'ctx>) {
         let func = self.funcs.get("unwind").unwrap();
-        self.builder.build_call(*func, &[f.get_first_param().unwrap()], "call_unwind");
+        self.builder
+            .build_call(*func, &[f.get_first_param().unwrap().into()], "call_unwind");
     }
 
     pub fn unwrap_node_val(
@@ -357,14 +486,35 @@ impl<'ctx> GenContext<'ctx> {
         self.unwrap_node_val(v, "node_num", 1)
     }
 
-    pub fn create_num(&self, f: FunctionValue<'ctx>, v: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+    pub fn create_num(
+        &self,
+        f: FunctionValue<'ctx>,
+        v: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("alloc_num").unwrap();
-        let alloc_num_call = self.builder
-            .build_call(*func, &[v], "call_alloc_num")
+        let alloc_num_call = self
+            .builder
+            .build_call(*func, &[v.into()], "call_alloc_num")
             .try_as_basic_value()
             .left()
             .unwrap();
         self.create_track(f, alloc_num_call)
+    }
+
+    pub fn create_str(
+        &self,
+        f: FunctionValue<'ctx>,
+        s: BasicValueEnum<'ctx>,
+        l: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let func = self.funcs.get("alloc_str").unwrap();
+        let alloc_str_call = self
+            .builder
+            .build_call(*func, &[s.into(), l.into()], "call_alloc_str")
+            .try_as_basic_value()
+            .left()
+            .unwrap();
+        self.create_track(f, alloc_str_call)
     }
 
     pub fn unwrap_data_tag(&self, v: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
@@ -378,8 +528,9 @@ impl<'ctx> GenContext<'ctx> {
         a: BasicValueEnum<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("alloc_global").unwrap();
-        let alloc_app_call = self.builder
-            .build_call(*func, &[gf, a], "call_alloc_global")
+        let alloc_app_call = self
+            .builder
+            .build_call(*func, &[gf.into(), a.into()], "call_alloc_global")
             .try_as_basic_value()
             .left()
             .unwrap();
@@ -393,8 +544,9 @@ impl<'ctx> GenContext<'ctx> {
         r: BasicValueEnum<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let func = self.funcs.get("alloc_app").unwrap();
-        let alloc_app_call = self.builder
-            .build_call(*func, &[l, r], "call_alloc_app")
+        let alloc_app_call = self
+            .builder
+            .build_call(*func, &[l.into(), r.into()], "call_alloc_app")
             .try_as_basic_value()
             .left()
             .unwrap();
@@ -405,8 +557,8 @@ impl<'ctx> GenContext<'ctx> {
         let offset0 = self.create_i32(0);
         unsafe {
             self.builder
-                .build_gep(v, &[offset0, offset0], "gmachine_stack_ptr_gep").into()
+                .build_gep(v, &[offset0, offset0], "gmachine_stack_ptr_gep")
+                .into()
         }
     }
 }
-

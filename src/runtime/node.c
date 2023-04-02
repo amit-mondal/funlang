@@ -1,6 +1,8 @@
 
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
+#include <stdio.h>
 #include "node.h"
 
 struct node_base* alloc_node() {
@@ -23,6 +25,14 @@ struct node_num* alloc_num(int32_t n) {
     struct node_num* node = (struct node_num*) alloc_node();
     node->base.kind = NODE_NUM;
     node->val = n;
+    return node;
+}
+
+struct node_str* alloc_str(char* c, uint32_t len) {
+    struct node_str* node = (struct node_str*) alloc_node();
+    node->base.kind = NODE_STR;
+    node->val = c;
+    node->len = len;
     return node;
 }
 

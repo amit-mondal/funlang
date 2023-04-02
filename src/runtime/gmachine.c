@@ -117,13 +117,17 @@ struct node_base* gmachine_track(struct gmachine* g, struct node_base* n) {
 }
 
 void free_node_data(struct node_base* n) {
-    if (n->kind == NODE_DATA) {
-        free(((struct node_data*) n)->arr);
+    switch (n->kind) {
+        case NODE_DATA: free(((struct node_data*) n)->arr);
+            break;
+        case NODE_STR: free(((struct node_str*) n)->val);
+            break;
+        default:
+            break;
     }
 }
 
 void gmachine_gc(struct gmachine* g) {
-    //printf("collecting...\n");
     for (size_t i = 0; i < g->stack.count; i++) {
         gc_visit_node(g->stack.data[i]);
     }
@@ -146,4 +150,30 @@ void gmachine_gc(struct gmachine* g) {
         }
     }
     //printf("freed %llu\n", (init_node_cnt - g->gc_node_cnt));
+}
+
+struct node_base* extern_strconcat(struct gmachine* g, struct node_base* l, struct node_base* r) {
+    /* TODO: this is not GC trackable */
+    struct node_str* ls = (struct node_str*) l;
+    struct node_str* rs = (struct node_str*) r;
+    char* concat = (char*) malloc(sizeof(char) * (ls->len + rs->len));
+    memcpy(concat, ls->val, ls->len);
+    for (size_t i = 0; i < rs->len; i++)  {
+        concat[ls->len + i] = rs->val[i];
+    }
+    rs->val = concat;
+    rs->len = (rs->len + ls->len);
+    gmachine_track(g, rs);
+    return (struct node_base*) rs;
+}
+
+struct node_base* extern_easyadd(struct gmachine* g, struct node_base* a, struct node_base* b, struct node_base* c, struct node_base* d) {
+    printf("it's so easy!\n");
+    struct node_num* ai = (struct node_num*) a;
+    struct node_num* bi = (struct node_num*) b;
+    struct node_num* ci = (struct node_num*) c;
+    struct node_num* di = (struct node_num*) d;
+    int32_t sum = ai->val + bi->val + ci->val + di->val;
+    printf("%d+%d+%d+%d=%d", ai->val, bi->val, ci->val, di->val, sum);
+    return alloc_num(sum);
 }

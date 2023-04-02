@@ -12,6 +12,7 @@ lalrpop = { version = "0.18.1", features = [ "lexer" ] }
 
 [dependencies]
 lalrpop-util = "0.18.1"
+id-arena = { version = "2" }
 regex = "1"
-inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "llvm10-0" }
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm12-0"] }
 clap = "~2.27.0"
